@@ -150,6 +150,19 @@ main{padding-block:14px 130px}
 .datefld .dfw{width:178px}
 .datefld .dtxt{min-height:40px}
 
+/* pick-up animation while reordering */
+.grip{user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+.lifted{position:relative;z-index:5;transform:scale(1.03);box-shadow:0 14px 34px rgba(0,0,0,.38);animation:pop .24s cubic-bezier(.2,.9,.3,1.3)}
+.row.lifted{grid-template-columns:1fr;grid-template-areas:"who"}
+.row.lifted .fld,.row.lifted .res,.row.lifted .acts,.row.lifted .life{display:none}
+.drop{animation:drop .32s cubic-bezier(.3,.8,.4,1)}
+@keyframes pop{0%{transform:scale(1)}55%{transform:scale(1.07)}100%{transform:scale(1.03)}}
+@keyframes drop{0%{transform:scale(1.03)}50%{transform:scale(.975)}100%{transform:scale(1)}}
+html.reordering,html.reordering *{user-select:none!important;-webkit-user-select:none!important;-webkit-touch-callout:none!important}
+button.pill{border:0;cursor:pointer}
+.pill[aria-pressed="true"]{box-shadow:0 0 0 2px var(--accent)}
+@media (prefers-reduced-motion:reduce){.lifted,.drop{animation:none}}
+
 /* hidden / done list */
 .hid-head{margin-top:20px}
 .crow{display:grid;gap:6px 12px;grid-template-columns:1fr auto;align-items:center;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px 12px}
@@ -345,7 +358,7 @@ const K_CAT='expiry.catalog.v1', K_DRAFT='expiry.draft.v1', K_HIST='expiry.histo
 /* ---------- state ---------- */
 const state = {
   catalog: [], rows: [], date: todayIso(), tab: 'check', autoHide: true,
-  group: 'ALL', q: '', catQ: '', showHidden: false, savedId: null,
+  group: 'ALL', stFilter: 'ALL', q: '', catQ: '', showHidden: false, savedId: null,
   history: [], store: 'checking', open: new Set()
 };
 let DB = null, checkBox = null;
@@ -443,26 +456,43 @@ function toast(msg, err=false){
 
 /* ---------- drag to reorder ---------- */
 function enableReorder(grip, node, getSibs, onDone){
+  grip.addEventListener('contextmenu', e=>e.preventDefault());
   grip.addEventListener('pointerdown', e=>{
     if (e.button!==undefined && e.button!==0) return;
     e.preventDefault();
-    const pid = e.pointerId;
-    node.classList.add('dragging');
+    const pid = e.pointerId, root = document.documentElement;
+    root.classList.add('reordering');
+    node.classList.remove('drop'); node.classList.add('dragging','lifted');
+    try { navigator.vibrate && navigator.vibrate(12); } catch(_){}
+    const noSel = ev=>ev.preventDefault();
+    document.addEventListener('selectstart', noSel);
     /* Moving the row in the DOM drops pointer capture, so listen on window instead. */
     const move = ev=>{
       if (ev.pointerId!==pid) return;
       const y = ev.clientY;
-      const sibs = getSibs().filter(n=>n!==node);
-      let before = null;
+      const all = getSibs(), tops = new Map(all.map(s=>[s, s.getBoundingClientRect().top]));
+      const sibs = all.filter(n=>n!==node);
+      let before = null, moved = false;
       for (const s of sibs){ const r = s.getBoundingClientRect(); if (y < r.top + r.height/2){ before = s; break; } }
-      if (before){ if (node.nextElementSibling!==before) before.before(node); }
-      else if (sibs.length){ const last = sibs[sibs.length-1]; if (last.nextElementSibling!==node) last.after(node); }
+      if (before){ if (node.nextElementSibling!==before){ before.before(node); moved = true; } }
+      else if (sibs.length){ const last = sibs[sibs.length-1]; if (last.nextElementSibling!==node){ last.after(node); moved = true; } }
+      if (moved){
+        for (const s of sibs){
+          const dy = tops.get(s) - s.getBoundingClientRect().top;
+          if (Math.abs(dy)>1 && s.animate) s.animate([{transform:`translateY(${dy}px)`},{transform:'none'}], {duration:180, easing:'cubic-bezier(.2,.8,.3,1)'});
+        }
+        try { navigator.vibrate && navigator.vibrate(6); } catch(_){}
+      }
       if (y < 90) window.scrollBy(0,-16); else if (y > window.innerHeight-120) window.scrollBy(0,16);
     };
     const end = ev=>{
       if (ev.pointerId!==pid) return;
       window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', end); window.removeEventListener('pointercancel', end);
-      node.classList.remove('dragging'); onDone();
+      document.removeEventListener('selectstart', noSel);
+      root.classList.remove('reordering');
+      node.classList.remove('dragging','lifted'); node.classList.add('drop');
+      node.addEventListener('animationend', ()=>node.classList.remove('drop'), {once:true});
+      onDone();
     };
     window.addEventListener('pointermove', move); window.addEventListener('pointerup', end); window.addEventListener('pointercancel', end);
   });
@@ -607,8 +637,8 @@ function delBtn(fn){
 }
 function paintRow(node, row, prod){
   const c = calc(row), r = resultText(row, prod);
-  const drag = node.classList.contains('dragging');
-  node.className = 'row st-'+c.st + (drag?' dragging':'');
+  const keep = ['dragging','lifted','drop'].filter(k=>node.classList.contains(k)).join(' ');
+  node.className = 'row st-'+c.st + (keep ? ' '+keep : '');
   const d = $('.days', node); d.textContent = r.d; d.className = 'days'+(r.idle?' idle':'');
   $('.sub', node).textContent = r.s;
   const life = $('.life input', node);
@@ -650,8 +680,9 @@ function hideRow(u, manual){
   if (!manual && !state.autoHide) return;
   clearTimeout(timers.get(u));
   row.hidden = true; saveDraft();
-  const n = $('#r-'+u); if (n) n.remove();
-  renderListHeads(); renderHidden(); renderSummary(); renderBar();
+  const n = $('#r-'+u);
+  if (n && (state.stFilter==='ALL' || state.stFilter==='none')){ n.remove(); renderListHeads(); }
+  renderHidden(); renderSummary(); renderBar();
 }
 function unhide(row){
   row.hidden = false; saveDraft();
@@ -779,12 +810,12 @@ function renderChips(){
 function renderSummary(){
   const cnt = {ok:0,warn:0,bad:0,na:0,none:0};
   for (const r of state.rows) cnt[calc(r).st]++;
-  const box = $('#summary'); box.replaceChildren(
-    el('span',{class:'pill'}, 'ยังไม่กรอก ', el('b',{text:cnt.none})),
-    el('span',{class:'pill bad'}, 'หมดอายุ ', el('b',{text:cnt.bad})),
-    el('span',{class:'pill warn'}, 'ใกล้หมดอายุ ', el('b',{text:cnt.warn})),
-    el('span',{class:'pill ok'}, 'ปกติ ', el('b',{text:cnt.ok})),
-    cnt.na ? el('span',{class:'pill'}, 'ไม่ระบุวันหมดอายุ ', el('b',{text:cnt.na})) : null);
+  const mk = (key,label,cls,n)=>el('button',{class:'pill '+cls, type:'button', 'aria-pressed':String(state.stFilter===key),
+    title:'กดเพื่อแสดงเฉพาะรายการนี้ กดซ้ำเพื่อยกเลิก',
+    onclick:()=>{ state.stFilter = state.stFilter===key ? 'ALL' : key; renderSummary(); renderList(); }}, label+' ', el('b',{text:n}));
+  $('#summary').replaceChildren(...[
+    mk('none','ยังไม่กรอก','',cnt.none), mk('bad','หมดอายุ','bad',cnt.bad), mk('warn','ใกล้หมดอายุ','warn',cnt.warn), mk('ok','ปกติ','ok',cnt.ok),
+    (cnt.na || state.stFilter==='na') ? mk('na','ไม่ระบุวันหมดอายุ','',cnt.na) : null].filter(Boolean));
   renderChips();
 }
 function renderListHeads(){
@@ -799,7 +830,8 @@ function renderListHeads(){
 function renderList(){
   const list = $('#list'); list.replaceChildren();
   const pm = pmap();
-  const vis = state.rows.filter(r=>!r.hidden && matchRow(r,pm));
+  const sf = state.stFilter;
+  const vis = state.rows.filter(r=>matchRow(r,pm) && (sf==='ALL' ? !r.hidden : calc(r).st===sf));
   let last = null; const counts = {};
   for (const r of vis){ const g = pm.get(r.pid).g; counts[g] = (counts[g]||0)+1; }
   for (const r of vis){
@@ -809,12 +841,13 @@ function renderList(){
   }
   if (!vis.length){
     const anyLeft = state.rows.some(r=>!r.hidden);
-    list.append(el('div',{class:'empty', text: state.rows.length && !anyLeft ? 'กรอกครบทุกรายการแล้ว กดบันทึกที่ด้านล่างได้เลย' : (state.rows.length ? 'ไม่พบรายการที่ตรงกับการค้นหา' : 'ยังไม่มีรายการ เพิ่มสินค้าได้ที่แท็บ "รายการสินค้า / อายุ"')}));
+    list.append(el('div',{class:'empty', text: sf!=='ALL' ? 'ไม่มีรายการในสถานะนี้' : state.rows.length && !anyLeft ? 'กรอกครบทุกรายการแล้ว กดบันทึกที่ด้านล่างได้เลย' : (state.rows.length ? 'ไม่พบรายการที่ตรงกับการค้นหา' : 'ยังไม่มีรายการ เพิ่มสินค้าได้ที่แท็บ "รายการสินค้า / อายุ"')}));
   }
   renderHidden(); renderChips();
 }
 function renderHidden(){
   const wrap = $('#hiddenWrap'); wrap.replaceChildren();
+  if (state.stFilter!=='ALL') return;
   const pm = pmap();
   const hid = state.rows.filter(r=>r.hidden && pm.has(r.pid));
   if (!hid.length) return;
@@ -1192,10 +1225,10 @@ function renderCatalog(){
   const list = state.catalog.filter(p=>!q || (p.code||'').toLowerCase().includes(q) || p.name.toLowerCase().includes(q));
   const unk = state.catalog.filter(p=>!p.noExp && !(p.months>0)).length;
   const nox = state.catalog.filter(p=>p.noExp).length;
-  $('#catSummary').replaceChildren(
+  $('#catSummary').replaceChildren(...[
     el('span',{class:'pill'}, 'สินค้าทั้งหมด ', el('b',{text:state.catalog.length})),
     nox ? el('span',{class:'pill'}, 'ไม่ระบุวันหมดอายุ ', el('b',{text:nox})) : null,
-    unk ? el('span',{class:'pill warn'}, 'ยังไม่ระบุอายุ ', el('b',{text:unk})) : null);
+    unk ? el('span',{class:'pill warn'}, 'ยังไม่ระบุอายุ ', el('b',{text:unk})) : null].filter(Boolean));
   for (const g of groupOrder()){
     const items = list.filter(p=>p.g===g); if (!items.length) continue;
     const card = el('div',{class:'card'}, el('div',{class:'cgrp', text:`${groupLabel(g)} (${items.length})`}));
@@ -1240,7 +1273,9 @@ function setTab(t){
   window.scrollTo({top:0});
 }
 function renderSync(){
-  $('#sync').textContent = state.store==='db' ? 'SINGHA CHANTHABURI' : state.store==='local' ? 'เก็บในเครื่องนี้เท่านั้น' : 'กำลังเชื่อมต่อ…';
+  const s = $('#sync');
+  s.textContent = 'SINGHA CHANTHABURI';
+  s.title = state.store==='db' ? 'ซิงก์ข้ามเครื่อง' : state.store==='local' ? 'ข้อมูลเก็บในเครื่องนี้เท่านั้น' : 'กำลังเชื่อมต่อ';
 }
 function newRound(){
   for (const t of timers.values()) clearTimeout(t); timers.clear();
